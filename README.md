@@ -107,6 +107,16 @@ sebagai gantinya, atau buat `.streamlit/secrets.toml` (sudah di-`.gitignore`, ja
   (z-score volatilitas bulanan, ambang 2 std dev) — tiap anomali dapat
   analisa singkat + rekomendasi yang mengarahkan balik ke Buy/Sell Guard
   (bukan sinyal beli/jual baru yang berdiri sendiri).
+- **Overlay ONI & curah hujan di grafik yang sama** — seri ONI historis
+  penuh (NOAA, 919 bulan sejak 1950) dan curah hujan bulanan Pantai
+  Gading/Ghana (Open-Meteo Archive, 20+ tahun) ditumpuk di sumbu-Y kedua
+  pada grafik tren harga yang sama, dengan toggle tampil/sembunyi per
+  overlay. Curah hujan diubah jadi anomali z-score per bulan kalender
+  (mirip Standardized Precipitation Index) supaya skalanya sebanding
+  dengan ONI. Dilengkapi **analisis korelasi-lag** (cross-correlation
+  Pearson, 0-6 bulan) — teknik standar riset dampak iklim-komoditas, lihat
+  `src/engine/korelasi.py` — hasilnya kuantitatif dan jujur (korelasi
+  lemah-sedang), dipakai sebagai konteks bukan sinyal prediksi.
 - **Dashboard Streamlit** — Buy Guard, Sell Guard, data pasar/iklim, form
   input manual, tab isi 7 parameter (lihat di atas), dan pengiriman brief
   ke email (opsional, lihat di atas).
