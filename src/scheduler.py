@@ -40,6 +40,24 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
+def save_config(cfg: dict) -> str:
+    """
+    Menulis ulang config/parameters.yaml. Dipanggil dari dashboard (tab
+    Parameter) supaya tujuh angka di spesifikasi bagian 11 bisa diisi lewat
+    UI, bukan cuma edit file manual.
+
+    PENTING: di Streamlit Community Cloud, filesystem-nya bisa ditulis saat
+    runtime tapi TIDAK permanen -- reboot/redeploy mengembalikannya ke isi
+    file di GitHub. Dashboard menampilkan YAML hasil akhir supaya bisa
+    disalin balik ke repo kalau mau perubahannya permanen. Return isi YAML
+    yang baru ditulis (string) untuk ditampilkan itu.
+    """
+    teks = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        f.write(teks)
+    return teks
+
+
 def ingest_harga():
     with db.get_connection() as conn:
         hasil = price.ambil_harga_hari_ini(conn)
