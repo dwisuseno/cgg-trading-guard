@@ -26,7 +26,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from . import db
 from .ingest import price, climate, weather, price_historis
-from .engine import buy_guard, sell_guard, scenario, musiman
+from .engine import buy_guard, sell_guard, scenario, musiman, korelasi
 from .notify import daily_brief
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -88,6 +88,50 @@ def ingest_historis_icco():
                 "diambil_pada": datetime.now().isoformat(timespec="seconds"),
             })
     log.info("Historis ICCO tersimpan: %d bulan (%s .. %s)", len(baris), baris[0]["periode"] if baris else "-", baris[-1]["periode"] if baris else "-")
+    return baris
+
+
+def ingest_historis_oni():
+    """Seluruh seri ONI historis (NOAA), dipetakan ke bulan kalender. Sekali
+    tarik sudah dapat puluhan tahun -- aman dipanggil ulang (upsert)."""
+    baris = climate.ambil_oni_historis()
+    with db.get_connection() as conn:
+        for b in baris:
+            db.upsert(conn, "climate_historis_bulanan", {
+                "periode": b["periode"],
+                "oni": b["oni"],
+                "fase": b["fase"],
+                "sumber": "NOAA ONI (cpc.ncep.noaa.gov)",
+                "diambil_pada": datetime.now().isoformat(timespec="seconds"),
+            })
+    log.info("Historis ONI tersimpan: %d bulan (%s .. %s)", len(baris), baris[0]["periode"] if baris else "-", baris[-1]["periode"] if baris else "-")
+    return baris
+
+
+def ingest_historis_cuaca_global_bulanan(mulai: str = "2005-01-01"):
+    """
+    Curah hujan bulanan historis untuk titik pantau global (Afrika Barat) --
+    dipakai untuk overlay grafik tren, bukan operasional harian. Ini fetch
+    yang lebih berat (arsip 20 tahun x tiap titik) -- jalankan sesekali,
+    bukan tiap dashboard dibuka.
+    """
+    cfg = load_config()
+    selesai = date.today().isoformat()
+    total = 0
+    with db.get_connection() as conn:
+        for t in cfg.get("titik_pantau_global", []):
+            per_bulan = weather.ambil_curah_hujan_historis_bulanan(t["lat"], t["lon"], mulai, selesai)
+            for periode, mm in per_bulan.items():
+                db.upsert(conn, "cuaca_historis_bulanan", {
+                    "periode": periode,
+                    "kode_titik": t["kode"],
+                    "curah_hujan_mm": mm,
+                    "sumber": "Open-Meteo Archive",
+                    "diambil_pada": datetime.now().isoformat(timespec="seconds"),
+                })
+            total += len(per_bulan)
+            log.info("Historis cuaca %s tersimpan: %d bulan", t["nama"], len(per_bulan))
+    return total
     return baris
 
 

@@ -12,7 +12,7 @@ rendemen:
   susut_sortasi_pct: 3.0
   catatan: WAJIB diganti dengan rendemen tertimbang aktual per titik terima
 overhead_cost:
-  nilai_rp_kg: 0.0
+  nilai_rp_kg: 1000.0
   catatan: Gabungan fermentasi + pengeringan + tenaga kerja + sortasi/packing + susut
     bobot, per kg kering. Ambil dari data aktual, bukan estimasi.
 other_cost:

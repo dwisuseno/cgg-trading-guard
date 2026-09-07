@@ -38,6 +38,23 @@ CREATE TABLE IF NOT EXISTS climate (
   diambil_pada TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS climate_historis_bulanan (
+  periode      TEXT PRIMARY KEY,  -- 'YYYY-MM'
+  oni          REAL,
+  fase         TEXT,
+  sumber       TEXT,
+  diambil_pada TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS cuaca_historis_bulanan (
+  periode         TEXT,           -- 'YYYY-MM'
+  kode_titik      TEXT,
+  curah_hujan_mm  REAL,
+  sumber          TEXT,
+  diambil_pada    TIMESTAMP,
+  PRIMARY KEY (periode, kode_titik)
+);
+
 CREATE TABLE IF NOT EXISTS weather (
   tanggal          DATE,
   kode_titik       TEXT,
@@ -156,6 +173,21 @@ def historis_bulanan(conn, tahun: int | None = None):
         rows = conn.execute(
             "SELECT * FROM market_price_historis_bulanan ORDER BY periode ASC"
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def oni_historis_bulanan(conn):
+    rows = conn.execute(
+        "SELECT * FROM climate_historis_bulanan ORDER BY periode ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cuaca_historis_bulanan(conn, kode_titik: str):
+    rows = conn.execute(
+        "SELECT * FROM cuaca_historis_bulanan WHERE kode_titik = ? ORDER BY periode ASC",
+        (kode_titik,),
+    ).fetchall()
     return [dict(r) for r in rows]
 
 

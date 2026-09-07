@@ -16,11 +16,34 @@ import streamlit as st
 from src import db, scheduler
 from src.ingest import price
 from src.notify import email_sender
-from src.engine import musiman, anomali
+from src.engine import musiman, anomali, korelasi
 
 st.set_page_config(page_title="CGG Trading Guard", page_icon="🌱", layout="wide")
 db.init_db()
 cfg = scheduler.load_config()
+
+_WARNA_RISIKO = {"rendah": "#5FA331", "sedang": "#E8A33D", "tinggi": "#D64545"}
+
+
+def _kartu_cuaca(nama: str, w: dict | None):
+    """Kartu cuaca ringkas (bukan st.json mentah) -- dipakai untuk titik lokal & global."""
+    if not w:
+        st.markdown(f"**{nama}**")
+        st.caption("Belum ada data.")
+        return
+    warna = _WARNA_RISIKO.get(w.get("risiko_proses"), "#6B7A8C")
+    with st.container(border=True):
+        st.markdown(f"**{nama}**")
+        c1, c2 = st.columns([2, 1])
+        c1.metric("Hujan 14 hari", f"{w.get('hujan_14hari_mm', '—')}mm")
+        with c2:
+            st.markdown(
+                f"<div style='margin-top:8px'><span style='background:{warna};color:white;"
+                f"padding:3px 10px;border-radius:12px;font-size:12.5px;font-weight:600;'>"
+                f"{(w.get('risiko_proses') or '—').upper()}</span></div>",
+                unsafe_allow_html=True,
+            )
+        st.caption(f"Kelembapan {w.get('kelembapan_pct', '—')}% · {w.get('tanggal', '—')}")
 
 st.title("🌱 CGG Trading Guard")
 st.caption("Sistem pendukung keputusan beli & jual kakao — bukan sistem prediksi harga.")
@@ -59,6 +82,10 @@ if not st.session_state.get("bootstrapped_today") == date.today().isoformat():
             _hist_ada = db.historis_bulanan(_conn)
             _bulan_ini = date.today().strftime("%Y-%m")
             _need_historis = not _hist_ada or _hist_ada[-1]["periode"] != _bulan_ini
+            # ONI & curah hujan historis jarang berubah drastis -- cukup tarik SEKALI
+            # (bukan tiap bulan seperti ICCO) supaya bootstrap harian tetap ringan.
+            _need_oni_historis = not db.oni_historis_bulanan(_conn)
+            _need_hujan_historis = not db.cuaca_historis_bulanan(_conn, cfg.get("titik_pantau_global", [{}])[0].get("kode", ""))
         if _need_harga:
             try:
                 scheduler.ingest_harga()
@@ -84,6 +111,16 @@ if not st.session_state.get("bootstrapped_today") == date.today().isoformat():
                 scheduler.ingest_historis_icco()
             except Exception as e:
                 st.toast(f"Gagal auto-ambil historis ICCO: {e}", icon="⚠️")
+        if _need_oni_historis:
+            try:
+                scheduler.ingest_historis_oni()
+            except Exception as e:
+                st.toast(f"Gagal auto-ambil historis ONI: {e}", icon="⚠️")
+        if _need_hujan_historis:
+            try:
+                scheduler.ingest_historis_cuaca_global_bulanan()
+            except Exception as e:
+                st.toast(f"Gagal auto-ambil historis curah hujan: {e}", icon="⚠️")
         # Buy Guard ikut dihitung ulang otomatis kalau harga hari ini sudah ada
         with db.get_connection() as _conn:
             _harga = db.latest_market_price(_conn)
@@ -94,9 +131,38 @@ if not st.session_state.get("bootstrapped_today") == date.today().isoformat():
                 st.toast(f"Gagal auto-hitung Buy Guard: {e}", icon="⚠️")
     st.session_state["bootstrapped_today"] = date.today().isoformat()
 
-tab_beli, tab_jual, tab_data, tab_input, tab_param = st.tabs(
-    ["💰 Buy Guard", "📦 Sell Guard", "📊 Data Pasar & Iklim", "✍️ Input Manual", "⚙️ Parameter (7 Angka)"]
-)
+# Navigasi pakai segmented_control (bukan st.tabs) supaya pilihan tab TIDAK
+# reset ke awal tiap ada interaksi lain di halaman (mis. klik tombol) --
+# st.tabs() murni tampilan, tidak menyimpan state; ini penting untuk demo
+# live supaya presenter tidak "terlempar" balik ke tab pertama tanpa sengaja.
+NAV_OPTIONS = ["💰 Buy Guard", "📊 Data Pasar & Iklim", "📦 Sell Guard", "⚙️ Parameter (7 Angka)", "✍️ Input Manual"]
+
+nav_col, refresh_col = st.columns([5, 1.7])
+with nav_col:
+    # st.radio(horizontal=True) dipakai, BUKAN st.segmented_control -- yang
+    # terakhir itu dites dan ternyata tidak konsisten menjaga state-nya
+    # sendiri lintas rerun (kadang lompat balik ke opsi lain begitu widget
+    # LAIN di halaman dipencet), meski key+default sudah benar. st.radio
+    # jauh lebih lawas dan battle-tested untuk pola stateful seperti ini --
+    # penting untuk demo live yang tidak boleh "melompat" sendiri.
+    nav = st.radio(
+        "Navigasi", NAV_OPTIONS, horizontal=True, label_visibility="collapsed", key="nav"
+    )
+with refresh_col:
+    if st.button("🔄 Refresh Semua Data", type="primary", width="stretch", key="refresh_all"):
+        with st.spinner("Mengambil harga, iklim, cuaca lokal+global, dan historis ICCO..."):
+            for _fn in (scheduler.ingest_harga, scheduler.ingest_oni, scheduler.ingest_cuaca,
+                        scheduler.ingest_cuaca_global, scheduler.ingest_historis_icco):
+                try:
+                    _fn()
+                except Exception as e:
+                    st.toast(f"{_fn.__name__} gagal: {e}", icon="⚠️")
+            try:
+                scheduler.hitung_buy_guard()
+            except Exception as e:
+                st.toast(f"Hitung Buy Guard gagal: {e}", icon="⚠️")
+        st.success("Semua data diperbarui.")
+        st.rerun()
 
 with db.get_connection() as conn:
     harga = db.latest_market_price(conn)
@@ -109,7 +175,7 @@ with db.get_connection() as conn:
 musim_ini = musiman.fase_panen_lokal(cfg)
 
 # ---------------- TAB: Buy Guard ----------------
-with tab_beli:
+if nav == "💰 Buy Guard":
     st.caption(
         "Struktur biaya: Harga Jual = **Biaya Pokok Produksi (Raw Material — angka di "
         "bawah ini)** + Overhead Cost + Other Cost + Margin. Ubah tiga komponen terakhir "
@@ -165,7 +231,7 @@ with tab_beli:
         st.caption("Belum ada hasil Buy Guard untuk hari ini.")
 
 # ---------------- TAB: Sell Guard ----------------
-with tab_jual:
+if nav == "📦 Sell Guard":
     if st.button("🔄 Hitung Sell Guard sekarang", key="run_sell"):
         with st.spinner("Menghitung..."):
             hasil_sell = scheduler.hitung_sell_guard()
@@ -190,7 +256,7 @@ with tab_jual:
         st.caption("Tekan tombol di atas untuk menghitung sinyal jual/tahan lot terbuka.")
 
 # ---------------- TAB: Data Pasar & Iklim ----------------
-with tab_data:
+if nav == "📊 Data Pasar & Iklim":
     st.subheader("📈 Tren Harga ICCO — Bulanan")
     st.caption(
         "Sumber: tabel statistik resmi ICCO (icco.org/statistics), rata-rata bulanan "
@@ -200,10 +266,15 @@ with tab_data:
 
     with db.get_connection() as conn:
         seri_historis = db.historis_bulanan(conn)
+        oni_historis = db.oni_historis_bulanan(conn)
+        hujan_historis = {
+            t["kode"]: db.cuaca_historis_bulanan(conn, t["kode"])
+            for t in cfg.get("titik_pantau_global", [])
+        }
 
-    hb1, hb2 = st.columns([1, 3])
+    hb1, hb2, hb3 = st.columns([1.3, 1.3, 2.4])
     with hb1:
-        if st.button("🔄 Perbarui data historis ICCO"):
+        if st.button("🔄 Perbarui harga ICCO"):
             with st.spinner("Mengambil dari icco.org (bisa 10-20 detik)..."):
                 try:
                     scheduler.ingest_historis_icco()
@@ -212,14 +283,29 @@ with tab_data:
                     st.error(f"Gagal mengambil data ICCO: {e}")
             st.rerun()
     with hb2:
+        if st.button("🔄 Perbarui iklim historis"):
+            with st.spinner("Mengambil ONI (NOAA) + curah hujan 20 tahun (Open-Meteo Archive)..."):
+                try:
+                    scheduler.ingest_historis_oni()
+                    scheduler.ingest_historis_cuaca_global_bulanan()
+                    st.success("Berhasil.")
+                except Exception as e:
+                    st.error(f"Gagal mengambil data iklim: {e}")
+            st.rerun()
+    with hb3:
         if seri_historis:
-            st.caption(f"{len(seri_historis)} bulan tersimpan · {seri_historis[0]['periode']} s/d {seri_historis[-1]['periode']}")
+            st.caption(
+                f"Harga: {len(seri_historis)} bulan ({seri_historis[0]['periode']} s/d {seri_historis[-1]['periode']}) · "
+                f"ONI: {len(oni_historis)} bulan · Curah hujan: {len(hujan_historis.get('CIV-01', []))} bulan"
+            )
 
     if not seri_historis:
         st.info("Belum ada data historis — tekan tombol di atas untuk mengambil dari ICCO.")
     else:
+        tampil_oni = st.checkbox("Tampilkan overlay ONI (El Nino/La Nina)", value=bool(oni_historis))
+        tampil_hujan = st.checkbox("Tampilkan overlay curah hujan Afrika Barat (anomali z-score)", value=bool(hujan_historis.get("CIV-01")))
+
         anomali_list = anomali.deteksi_anomali(seri_historis)
-        anomali_periode = {a["periode"] for a in anomali_list}
 
         df_hist = pd.DataFrame(seri_historis)
         df_hist["tanggal"] = pd.to_datetime(df_hist["periode"], format="%Y-%m")
@@ -234,6 +320,7 @@ with tab_data:
             line=dict(color="#5FA331", width=2.5),
             fill="tozeroy", fillcolor="rgba(95,163,49,0.10)",
             hovertemplate="%{x|%b %Y}<br>US$ %{y:,.0f}/ton<extra></extra>",
+            yaxis="y1",
         ))
         for arah, warna, simbol in [("naik", "#D64545", "triangle-up"), ("turun", "#1E88E5", "triangle-down")]:
             sub = df_hist[df_hist["warna_anomali"] == arah]
@@ -243,9 +330,40 @@ with tab_data:
                     mode="markers", name=f"Anomali {arah}",
                     marker=dict(color=warna, size=11, symbol=simbol, line=dict(color="white", width=1)),
                     hovertemplate="%{x|%b %Y}<br>US$ %{y:,.0f}/ton<br>Anomali " + arah + "<extra></extra>",
+                    yaxis="y1",
                 ))
+
+        if tampil_oni and oni_historis:
+            # Batasi ke rentang yang sama dengan data harga -- ONI NOAA punya
+            # data sejak 1950, jauh lebih panjang dari harga ICCO (2005+);
+            # tanpa dibatasi, rentang tanggal default grafik jadi 1950-2030
+            # dan bagian harga yang justru jadi fokus utama malah terjepit kecil.
+            _periode_awal_harga = seri_historis[0]["periode"]
+            df_oni = pd.DataFrame([b for b in oni_historis if b["periode"] >= _periode_awal_harga])
+            df_oni["tanggal"] = pd.to_datetime(df_oni["periode"], format="%Y-%m")
+            fig.add_trace(go.Scatter(
+                x=df_oni["tanggal"], y=df_oni["oni"],
+                mode="lines", name="ONI (El Nino +/La Nina -)",
+                line=dict(color="#E8A33D", width=1.6, dash="dot"),
+                hovertemplate="%{x|%b %Y}<br>ONI %{y:+.2f}<extra></extra>",
+                yaxis="y2",
+            ))
+
+        if tampil_hujan and hujan_historis.get("CIV-01"):
+            hujan_seri = {b["periode"]: b["curah_hujan_mm"] for b in hujan_historis["CIV-01"]}
+            hujan_z = korelasi.zscore_anomali_bulanan(hujan_seri)
+            df_hujan = pd.DataFrame(sorted(hujan_z.items()), columns=["periode", "z"])
+            df_hujan["tanggal"] = pd.to_datetime(df_hujan["periode"], format="%Y-%m")
+            fig.add_trace(go.Scatter(
+                x=df_hujan["tanggal"], y=df_hujan["z"],
+                mode="lines", name="Curah hujan Pantai Gading (anomali z-score)",
+                line=dict(color="#4FC3E8", width=1.4, dash="dash"),
+                hovertemplate="%{x|%b %Y}<br>Anomali hujan %{y:+.2f}σ<extra></extra>",
+                yaxis="y2",
+            ))
+
         fig.update_layout(
-            height=420,
+            height=440,
             margin=dict(l=10, r=10, t=10, b=10),
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
@@ -262,8 +380,48 @@ with tab_data:
                 type="date",
             ),
             yaxis=dict(title="US$/ton", gridcolor="rgba(255,255,255,0.08)"),
+            yaxis2=dict(title="Indeks anomali iklim (~-3..+3)", overlaying="y", side="right", gridcolor="rgba(0,0,0,0)", zeroline=True, zerolinecolor="rgba(255,255,255,0.2)"),
         )
         st.plotly_chart(fig, width="stretch")
+
+        if (tampil_oni and oni_historis) or (tampil_hujan and hujan_historis.get("CIV-01")):
+            with st.expander("📐 Metodologi: analisis korelasi-lag iklim vs harga"):
+                st.caption(
+                    "Teknik standar riset dampak iklim-komoditas (cross-correlation): untuk tiap "
+                    "jeda 0-6 bulan, dihitung korelasi Pearson antara indikator iklim bulan t dan "
+                    "% perubahan harga bulan t+lag. Curah hujan dulu diubah jadi anomali z-score "
+                    "per bulan kalender (menghilangkan pola musiman, mirip Standardized "
+                    "Precipitation Index) supaya sebanding skalanya dengan ONI. **Ini korelasi, "
+                    "bukan model prediksi** — dipakai untuk konteks, bukan sinyal beli/jual "
+                    "otomatis (lihat prinsip P2, sistem ini tidak memprediksi harga)."
+                )
+                harga_usd = {b["periode"]: b["index_usd_ton"] for b in seri_historis}
+                perubahan = korelasi.perubahan_pct_bulanan(harga_usd)
+                if tampil_oni and oni_historis:
+                    oni_seri = {b["periode"]: b["oni"] for b in oni_historis if b["periode"] in harga_usd}
+                    top = korelasi.korelasi_lag(oni_seri, perubahan)
+                    if top:
+                        best = top[0]
+                        st.markdown(
+                            f"**ONI** — korelasi terkuat di lag **{best['lag_bulan']} bulan**: "
+                            f"r = {best['r']:+.3f} ({korelasi.kekuatan_korelasi(best['r'])}, n={best['n']})"
+                        )
+                if tampil_hujan and hujan_historis.get("CIV-01"):
+                    hujan_seri2 = {b["periode"]: b["curah_hujan_mm"] for b in hujan_historis["CIV-01"] if b["periode"] in harga_usd}
+                    hujan_z2 = korelasi.zscore_anomali_bulanan(hujan_seri2)
+                    top2 = korelasi.korelasi_lag(hujan_z2, perubahan)
+                    if top2:
+                        best2 = top2[0]
+                        st.markdown(
+                            f"**Curah hujan Pantai Gading** — korelasi terkuat di lag **{best2['lag_bulan']} bulan**: "
+                            f"r = {best2['r']:+.3f} ({korelasi.kekuatan_korelasi(best2['r'])}, n={best2['n']})"
+                        )
+                st.caption(
+                    "Korelasi yang lemah-sedang justru memvalidasi P2/P3: harga kakao digerakkan "
+                    "banyak faktor sekaligus (spekulasi, rantai pasok, kurs), bukan satu indikator "
+                    "iklim tunggal — karena itu Trading Guard fokus mengelola posisi & biaya, "
+                    "bukan meramal arah harga dari satu sinyal."
+                )
 
         if anomali_list:
             st.markdown("**🔍 Anomali terdeteksi (>2 standar deviasi dari volatilitas normal)**")
@@ -282,8 +440,11 @@ with tab_data:
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Harga pasar")
-        if harga:
-            st.json({k: v for k, v in harga.items()})
+        if harga and harga.get("index_idr_per_kg"):
+            m1, m2 = st.columns(2)
+            m1.metric("Index (Rp/kg)", f"Rp {harga['index_idr_per_kg']:,.0f}".replace(",", "."))
+            m2.metric("US$/ton", f"{harga.get('index_rekonstruksi_usd', 0):,.0f}".replace(",", "."))
+            st.caption(f"Kurs Rp{harga.get('kurs_usd_idr', 0):,.0f}/USD · {harga.get('sumber', '—')}".replace(",", "."))
         else:
             st.caption("Belum ada data.")
         st.subheader("Iklim (ONI)")
@@ -296,7 +457,8 @@ with tab_data:
                     st.error(f"Gagal mengambil ONI: {e}")
             st.rerun()
         if clim:
-            st.json({k: v for k, v in clim.items()})
+            fase_label = {"el_nino": "El Nino", "la_nina": "La Nina", "netral": "Netral"}.get(clim.get("fase"), "—")
+            st.metric(f"ONI ({clim.get('periode', '—')})", f"{clim.get('oni', 0):+.2f}", fase_label)
         else:
             st.caption("Belum ada data.")
     with c2:
@@ -310,9 +472,7 @@ with tab_data:
                     st.error(f"Gagal mengambil cuaca: {e}")
             st.rerun()
         for t in cfg["titik_terima"]:
-            w = cuaca_per_titik.get(t["kode"])
-            st.markdown(f"**{t['nama']}** ({t['kode']})")
-            st.json(w if w else {"status": "belum ada data"})
+            _kartu_cuaca(t["nama"], cuaca_per_titik.get(t["kode"]))
 
     st.divider()
     st.subheader("🌍 Cuaca Sabuk Produsen Global")
@@ -330,10 +490,8 @@ with tab_data:
         st.rerun()
     cg1, cg2 = st.columns(2)
     for col, t in zip([cg1, cg2], cfg.get("titik_pantau_global", [])):
-        w = cuaca_global_per_titik.get(t["kode"])
         with col:
-            st.markdown(f"**{t['nama']}** ({t['kode']})")
-            st.json(w if w else {"status": "belum ada data"})
+            _kartu_cuaca(t["nama"], cuaca_global_per_titik.get(t["kode"]))
 
     st.divider()
     st.subheader("📨 Daily Brief")
@@ -361,7 +519,7 @@ with tab_data:
             )
 
 # ---------------- TAB: Input Manual ----------------
-with tab_input:
+if nav == "✍️ Input Manual":
     st.subheader("Harga hari ini")
     st.caption(
         "Sejak dashboard dibuka tadi, harga sudah dicoba diambil **otomatis** dari Yahoo "
@@ -435,7 +593,7 @@ with tab_input:
             st.rerun()
 
 # ---------------- TAB: Parameter (7 Angka, spesifikasi bagian 11) ----------------
-with tab_param:
+if nav == "⚙️ Parameter (7 Angka)":
     st.subheader("Isi tujuh angka yang wajib dikonfirmasi (Bagian 11 spesifikasi)")
     st.caption(
         "Ini yang membuat Buy Guard & Sell Guard berhenti memakai angka 0/template dan "
