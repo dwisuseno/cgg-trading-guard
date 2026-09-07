@@ -10,11 +10,13 @@ from datetime import date
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from src import db, scheduler
 from src.ingest import price
 from src.notify import email_sender
+from src.engine import musiman, anomali
 
 st.set_page_config(page_title="CGG Trading Guard", page_icon="🌱", layout="wide")
 db.init_db()
@@ -36,17 +38,32 @@ if cfg["meta"]["status"] != "TERVALIDASI":
 # Streamlit Cloud tidak menjalankan scheduler.py di latar belakang (lihat README) --
 # jadi dashboard sendiri yang menutup celah itu: begitu ada orang membuka halaman
 # ini, ia mengecek data hari ini dan menariknya kalau belum ada, meniru job `pagi()`
-# tanpa perlu proses cron terpisah. Harga tetap TIDAK di-auto-isi (Layer 3 sengaja
-# manual, lihat spesifikasi bagian 3.1) -- hanya iklim, cuaca, dan Buy Guard turunannya.
+# tanpa perlu proses cron terpisah -- termasuk harga (Yahoo Finance + kurs, lihat
+# src/ingest/price.py), yang sejak 2026-09 sudah otomatis dan tidak wajib diisi
+# manual lagi. Input manual tetap ada sebagai override/fallback kalau fetch-nya gagal.
 if not st.session_state.get("bootstrapped_today") == date.today().isoformat():
-    with st.spinner("Menyiapkan data hari ini (iklim, cuaca)..."):
+    with st.spinner("Menyiapkan data hari ini (harga, iklim, cuaca)..."):
         with db.get_connection() as _conn:
+            _harga_ada = db.latest_market_price(_conn)
+            _need_harga = not _harga_ada or _harga_ada.get("tanggal") != date.today().isoformat()
             _clim = db.latest_climate(_conn)
             _need_climate = not _clim or _clim.get("periode", "")[:4] != str(date.today().year)
             _need_weather = any(
                 (db.latest_weather(_conn, t["kode"]) or {}).get("tanggal") != date.today().isoformat()
                 for t in cfg["titik_terima"]
             )
+            _need_weather_global = any(
+                (db.latest_weather(_conn, t["kode"]) or {}).get("tanggal") != date.today().isoformat()
+                for t in cfg.get("titik_pantau_global", [])
+            )
+            _hist_ada = db.historis_bulanan(_conn)
+            _bulan_ini = date.today().strftime("%Y-%m")
+            _need_historis = not _hist_ada or _hist_ada[-1]["periode"] != _bulan_ini
+        if _need_harga:
+            try:
+                scheduler.ingest_harga()
+            except Exception as e:
+                st.toast(f"Gagal auto-ambil harga: {e}", icon="⚠️")
         if _need_climate:
             try:
                 scheduler.ingest_oni()
@@ -57,6 +74,16 @@ if not st.session_state.get("bootstrapped_today") == date.today().isoformat():
                 scheduler.ingest_cuaca()
             except Exception as e:
                 st.toast(f"Gagal auto-ambil cuaca: {e}", icon="⚠️")
+        if _need_weather_global:
+            try:
+                scheduler.ingest_cuaca_global()
+            except Exception as e:
+                st.toast(f"Gagal auto-ambil cuaca global: {e}", icon="⚠️")
+        if _need_historis:
+            try:
+                scheduler.ingest_historis_icco()
+            except Exception as e:
+                st.toast(f"Gagal auto-ambil historis ICCO: {e}", icon="⚠️")
         # Buy Guard ikut dihitung ulang otomatis kalau harga hari ini sudah ada
         with db.get_connection() as _conn:
             _harga = db.latest_market_price(_conn)
@@ -75,18 +102,44 @@ with db.get_connection() as conn:
     harga = db.latest_market_price(conn)
     clim = db.latest_climate(conn)
     cuaca_per_titik = {t["kode"]: db.latest_weather(conn, t["kode"]) for t in cfg["titik_terima"]}
+    cuaca_global_per_titik = {t["kode"]: db.latest_weather(conn, t["kode"]) for t in cfg.get("titik_pantau_global", [])}
     rows_today = db.buy_guard_today(conn, date.today().isoformat())
     lots = db.open_lots(conn)
 
+musim_ini = musiman.fase_panen_lokal(cfg)
+
 # ---------------- TAB: Buy Guard ----------------
 with tab_beli:
+    st.caption(
+        "Struktur biaya: Harga Jual = **Biaya Pokok Produksi (Raw Material — angka di "
+        "bawah ini)** + Overhead Cost + Other Cost + Margin. Ubah tiga komponen terakhir "
+        "di tab **⚙️ Parameter (7 Angka)**."
+    )
+
+    with st.container(border=True):
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            st.caption("📅 Musim")
+            st.markdown(f"### {musim_ini['label']}")
+        with c2:
+            st.markdown(f"**Dampak:** {musim_ini['dampak']}")
+            st.markdown(f"**Antisipasi:** {musim_ini['antisipasi']}")
+        st.caption(
+            "Catatan kualitatif dari kalender panen (edit di tab ⚙️ Parameter) — "
+            "belum mengubah angka Buy Guard secara otomatis, lihat penjelasan di sana."
+        )
+
     if not harga or not harga.get("index_idr_per_kg"):
-        st.info("Belum ada harga index hari ini. Isi lewat tab **Input Manual** dulu, lalu tekan **Hitung Buy Guard** di bawah.")
+        st.info("Belum ada harga index hari ini — tekan tombol di bawah untuk ambil otomatis, atau isi manual lewat tab **Input Manual**.")
     else:
+        sumber_txt = harga.get("sumber", "")
+        label_sumber = " (fallback/basi)" if harga.get("stale") else (" (otomatis)" if "otomatis" in sumber_txt else " (manual)")
         st.metric("Index harga (Rp/kg kering-setara)", f"Rp {harga['index_idr_per_kg']:,.0f}".replace(",", "."))
+        st.caption(f"Sumber: {sumber_txt or '—'}{label_sumber} · tanggal {harga.get('tanggal', '—')}")
 
     if st.button("🔄 Ingest harga + hitung Buy Guard sekarang", key="run_buy"):
-        with st.spinner("Menghitung..."):
+        with st.spinner("Mengambil harga & menghitung..."):
+            scheduler.ingest_harga()
             scheduler.hitung_buy_guard()
         st.rerun()
 
@@ -138,6 +191,94 @@ with tab_jual:
 
 # ---------------- TAB: Data Pasar & Iklim ----------------
 with tab_data:
+    st.subheader("📈 Tren Harga ICCO — Bulanan")
+    st.caption(
+        "Sumber: tabel statistik resmi ICCO (icco.org/statistics), rata-rata bulanan "
+        "sejak Januari 2005 — bukan Yahoo Finance proxy yang dipakai untuk harga harian "
+        "di tab lain."
+    )
+
+    with db.get_connection() as conn:
+        seri_historis = db.historis_bulanan(conn)
+
+    hb1, hb2 = st.columns([1, 3])
+    with hb1:
+        if st.button("🔄 Perbarui data historis ICCO"):
+            with st.spinner("Mengambil dari icco.org (bisa 10-20 detik)..."):
+                try:
+                    scheduler.ingest_historis_icco()
+                    st.success("Berhasil.")
+                except Exception as e:
+                    st.error(f"Gagal mengambil data ICCO: {e}")
+            st.rerun()
+    with hb2:
+        if seri_historis:
+            st.caption(f"{len(seri_historis)} bulan tersimpan · {seri_historis[0]['periode']} s/d {seri_historis[-1]['periode']}")
+
+    if not seri_historis:
+        st.info("Belum ada data historis — tekan tombol di atas untuk mengambil dari ICCO.")
+    else:
+        anomali_list = anomali.deteksi_anomali(seri_historis)
+        anomali_periode = {a["periode"] for a in anomali_list}
+
+        df_hist = pd.DataFrame(seri_historis)
+        df_hist["tanggal"] = pd.to_datetime(df_hist["periode"], format="%Y-%m")
+        df_hist["warna_anomali"] = df_hist["periode"].apply(
+            lambda p: next((a["arah"] for a in anomali_list if a["periode"] == p), None)
+        )
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_hist["tanggal"], y=df_hist["index_usd_ton"],
+            mode="lines", name="Index ICCO (US$/ton)",
+            line=dict(color="#5FA331", width=2.5),
+            fill="tozeroy", fillcolor="rgba(95,163,49,0.10)",
+            hovertemplate="%{x|%b %Y}<br>US$ %{y:,.0f}/ton<extra></extra>",
+        ))
+        for arah, warna, simbol in [("naik", "#D64545", "triangle-up"), ("turun", "#1E88E5", "triangle-down")]:
+            sub = df_hist[df_hist["warna_anomali"] == arah]
+            if not sub.empty:
+                fig.add_trace(go.Scatter(
+                    x=sub["tanggal"], y=sub["index_usd_ton"],
+                    mode="markers", name=f"Anomali {arah}",
+                    marker=dict(color=warna, size=11, symbol=simbol, line=dict(color="white", width=1)),
+                    hovertemplate="%{x|%b %Y}<br>US$ %{y:,.0f}/ton<br>Anomali " + arah + "<extra></extra>",
+                ))
+        fig.update_layout(
+            height=420,
+            margin=dict(l=10, r=10, t=10, b=10),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            xaxis=dict(
+                rangeselector=dict(buttons=[
+                    dict(count=1, label="1T", step="year", stepmode="backward"),
+                    dict(count=3, label="3T", step="year", stepmode="backward"),
+                    dict(count=5, label="5T", step="year", stepmode="backward"),
+                    dict(step="all", label="Semua"),
+                ]),
+                rangeslider=dict(visible=True, thickness=0.06),
+                type="date",
+            ),
+            yaxis=dict(title="US$/ton", gridcolor="rgba(255,255,255,0.08)"),
+        )
+        st.plotly_chart(fig, width="stretch")
+
+        if anomali_list:
+            st.markdown("**🔍 Anomali terdeteksi (>2 standar deviasi dari volatilitas normal)**")
+            for a in anomali_list[:8]:
+                warna_bg = "🔴" if a["arah"] == "naik" else "🔵"
+                with st.container(border=True):
+                    st.markdown(f"{warna_bg} **{a['periode']}** — {a['pct_perubahan']:+.1f}% (z={a['z_score']})")
+                    st.caption(a["analisa"])
+                    st.markdown(f"**Rekomendasi:** {a['rekomendasi']}")
+            if len(anomali_list) > 8:
+                st.caption(f"...dan {len(anomali_list) - 8} anomali lain (tampil 8 terbaru).")
+        else:
+            st.caption("Tidak ada anomali >2 standar deviasi pada data yang tersimpan.")
+
+    st.divider()
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Harga pasar")
@@ -174,6 +315,27 @@ with tab_data:
             st.json(w if w else {"status": "belum ada data"})
 
     st.divider()
+    st.subheader("🌍 Cuaca Sabuk Produsen Global")
+    st.caption(
+        "Afrika Barat — pendorong utama index dunia, beda dari cuaca lokal di atas "
+        "(itu soal risiko proses CGG sendiri). Dari catatan tim: \"kondisi iklim Utara\"."
+    )
+    if st.button("🔄 Ambil cuaca global terbaru"):
+        with st.spinner("Mengambil data Open-Meteo untuk Pantai Gading & Ghana..."):
+            try:
+                scheduler.ingest_cuaca_global()
+                st.success("Berhasil.")
+            except Exception as e:
+                st.error(f"Gagal mengambil cuaca global: {e}")
+        st.rerun()
+    cg1, cg2 = st.columns(2)
+    for col, t in zip([cg1, cg2], cfg.get("titik_pantau_global", [])):
+        w = cuaca_global_per_titik.get(t["kode"])
+        with col:
+            st.markdown(f"**{t['nama']}** ({t['kode']})")
+            st.json(w if w else {"status": "belum ada data"})
+
+    st.divider()
     st.subheader("📨 Daily Brief")
     if st.button("Susun daily brief sekarang"):
         with st.spinner("Menyusun..."):
@@ -200,25 +362,44 @@ with tab_data:
 
 # ---------------- TAB: Input Manual ----------------
 with tab_input:
-    st.subheader("Catat harga hari ini (Layer 3 — fallback yang selalu tersedia)")
-    with st.form("form_harga"):
-        c1, c2, c3 = st.columns(3)
-        ny = c1.number_input("ICE New York (USD/ton)", min_value=0.0, step=10.0)
-        ld = c2.number_input("ICE London (GBP/ton, opsional)", min_value=0.0, step=10.0)
-        kurs = c3.number_input("Kurs USD/IDR (mis. JISDOR)", min_value=0.0, step=10.0, value=float(harga.get("kurs_usd_idr") or 0) if harga else 0.0)
-        icco = st.number_input("Harga resmi ICCO hari ini (USD/ton, opsional — untuk kalibrasi)", min_value=0.0, step=10.0)
-        submitted = st.form_submit_button("Simpan harga hari ini")
-        if submitted:
+    st.subheader("Harga hari ini")
+    st.caption(
+        "Sejak dashboard dibuka tadi, harga sudah dicoba diambil **otomatis** dari Yahoo "
+        "Finance (kontrak depan ICE Cocoa NY) + kurs USD/IDR — lihat status di tab **💰 Buy "
+        "Guard**. Form di bawah untuk **override manual** kalau fetch otomatis gagal, atau "
+        "kalau Anda punya angka yang lebih Anda percaya (mis. dari broker langsung)."
+    )
+    if st.button("🔄 Coba ambil otomatis lagi sekarang", key="retry_auto_price"):
+        with st.spinner("Mengambil dari Yahoo Finance + kurs..."):
             with db.get_connection() as conn:
-                row = price.catat_harga_manual(
-                    conn,
-                    ice_ny_usd_ton=ny or None,
-                    ice_london_gbp_ton=ld or None,
-                    kurs_usd_idr=kurs or None,
-                    icco_resmi_usd=icco or None,
-                )
-            st.success(f"Tersimpan: Rp {row['index_idr_per_kg']:,.0f}/kg".replace(",", ".") if row.get("index_idr_per_kg") else "Tersimpan (index belum lengkap — isi kurs & minimal satu harga futures).")
-            st.rerun()
+                hasil = price.ambil_harga_hari_ini(conn)
+        if hasil.get("status") == "KOSONG":
+            st.error(hasil["pesan"])
+        elif hasil.get("stale"):
+            st.warning("Fetch otomatis gagal — masih pakai data lama. Isi manual di bawah kalau perlu.")
+        else:
+            st.success(f"Berhasil: Rp {hasil.get('index_idr_per_kg', 0):,.0f}/kg (sumber: {hasil.get('sumber')})".replace(",", "."))
+        st.rerun()
+
+    with st.expander("✍️ Isi / timpa manual"):
+        with st.form("form_harga"):
+            c1, c2, c3 = st.columns(3)
+            ny = c1.number_input("ICE New York (USD/ton)", min_value=0.0, step=10.0)
+            ld = c2.number_input("ICE London (GBP/ton, opsional)", min_value=0.0, step=10.0)
+            kurs = c3.number_input("Kurs USD/IDR (mis. JISDOR)", min_value=0.0, step=10.0, value=float(harga.get("kurs_usd_idr") or 0) if harga else 0.0)
+            icco = st.number_input("Harga resmi ICCO hari ini (USD/ton, opsional — untuk kalibrasi)", min_value=0.0, step=10.0)
+            submitted = st.form_submit_button("Simpan harga hari ini")
+            if submitted:
+                with db.get_connection() as conn:
+                    row = price.catat_harga_manual(
+                        conn,
+                        ice_ny_usd_ton=ny or None,
+                        ice_london_gbp_ton=ld or None,
+                        kurs_usd_idr=kurs or None,
+                        icco_resmi_usd=icco or None,
+                    )
+                st.success(f"Tersimpan: Rp {row['index_idr_per_kg']:,.0f}/kg".replace(",", ".") if row.get("index_idr_per_kg") else "Tersimpan (index belum lengkap — isi kurs & minimal satu harga futures).")
+                st.rerun()
 
     st.divider()
     st.subheader("Tambah lot (untuk Sell Guard)")
@@ -262,6 +443,19 @@ with tab_param:
         "bukan estimasi kasar."
     )
 
+    # Di luar form supaya label tombol simpan langsung bereaksi saat dicentang
+    # (widget di dalam st.form baru "hidup" setelah tombol submit ditekan).
+    nama_pengisi = st.text_input("Nama Anda (untuk jejak audit `diperbarui_oleh`)", key="nama_pengisi_param")
+    konfirmasi = st.checkbox(
+        "Saya konfirmasi seluruh angka di bawah ini berasal dari data aktual CGG "
+        "(kontrak/invoice/catatan produksi) — bukan estimasi atau template.",
+        key="konfirmasi_param",
+    )
+    if konfirmasi:
+        st.success("Akan disimpan sebagai **TERVALIDASI** begitu ditekan.")
+    else:
+        st.caption("Belum dicentang → tetap tersimpan sebagai draft (status tetap BELUM DIVALIDASI).")
+
     with st.form("form_parameter"):
         st.markdown("**1 & 6 — Rendemen basah → kering** _(nilai tertimbang aktual; 6 = sebaran optimis/basis/konservatif)_")
         c1, c2, c3 = st.columns(3)
@@ -278,23 +472,25 @@ with tab_param:
                                          value=float(cfg["rendemen"]["susut_sortasi_pct"]))
 
         st.divider()
-        st.markdown("**2 — Biaya proses** _(Rp per kg KERING)_")
-        b1, b2, b3, b4, b5 = st.columns(5)
-        biaya_fermentasi = b1.number_input("Fermentasi", min_value=0.0, step=50.0, value=float(cfg["biaya_proses"]["fermentasi"]))
-        biaya_pengeringan = b2.number_input("Pengeringan", min_value=0.0, step=50.0, value=float(cfg["biaya_proses"]["pengeringan"]))
-        biaya_tenaga = b3.number_input("Tenaga kerja", min_value=0.0, step=50.0, value=float(cfg["biaya_proses"]["tenaga_kerja"]))
-        biaya_sortasi = b4.number_input("Sortasi & packing", min_value=0.0, step=50.0, value=float(cfg["biaya_proses"]["sortasi_packing"]))
-        biaya_susut = b5.number_input("Susut bobot", min_value=0.0, step=50.0, value=float(cfg["biaya_proses"]["susut_bobot"]))
+        st.markdown(
+            "**Struktur biaya:** Harga Jual = _Biaya Pokok Produksi (Raw Material — "
+            "dihitung Buy Guard, bukan input)_ + **Overhead Cost** + **Other Cost** + **Margin**."
+        )
+
+        st.markdown("**2 — Overhead Cost** _(Rp per kg kering — gabungan fermentasi, pengeringan, tenaga kerja, sortasi/packing, susut bobot)_")
+        overhead_cost_input = st.number_input(
+            "Overhead Cost", min_value=0.0, step=50.0,
+            value=float(cfg["overhead_cost"]["nilai_rp_kg"]), key="overhead_cost_input",
+        )
 
         st.divider()
-        st.markdown("**3 — Overhead** _(Rp per kg kering, kecuali disebutkan lain)_")
-        o1, o2, o3, o4 = st.columns(4)
-        ovh_freight = o1.number_input("Freight ke buyer", min_value=0.0, step=50.0, value=float(cfg["overhead"]["freight_ke_buyer"]))
-        ovh_gudang = o2.number_input("Penyimpanan gudang", min_value=0.0, step=50.0, value=float(cfg["overhead"]["penyimpanan_gudang"]))
-        ovh_umum = o3.number_input("Overhead umum (alokasi)", min_value=0.0, step=50.0, value=float(cfg["overhead"]["overhead_umum"]))
-        ovh_susut_bln = o4.number_input("Susut simpan (%/bulan)", min_value=0.0, step=0.1, value=float(cfg["overhead"]["susut_penyimpanan_pct_per_bulan"]))
+        st.markdown("**3 — Other Cost** _(Rp per kg kering — freight ke buyer, penyimpanan gudang, alokasi biaya tetap)_")
+        other_cost_input = st.number_input(
+            "Other Cost", min_value=0.0, step=50.0,
+            value=float(cfg["other_cost"]["nilai_rp_kg"]), key="other_cost_input",
+        )
 
-        st.markdown("_Freight tambahan per titik terima (kalau ada selisih ongkos angkut):_")
+        st.markdown("_Freight tambahan per titik terima (kalau ada selisih ongkos angkut — ditambahkan di atas Other Cost):_")
         freight_titik = {}
         cols_titik = st.columns(len(cfg["titik_terima"]))
         for col, t in zip(cols_titik, cfg["titik_terima"]):
@@ -344,11 +540,18 @@ with tab_param:
                                               value=float(cfg["cost_of_carry"]["risiko_turun_grade_pct_per_bulan"]))
 
         st.divider()
-        nama_pengisi = st.text_input("Nama Anda (untuk jejak audit `diperbarui_oleh`)")
-        konfirmasi = st.checkbox(
-            "Saya konfirmasi seluruh angka di atas berasal dari data aktual CGG "
-            "(kontrak/invoice/catatan produksi) — bukan estimasi atau template."
+        st.markdown(
+            "**Tambahan — Kalender Musim Panen Lokal** _(dari catatan tim; masih perkiraan, "
+            "koreksi kalau salah — angka bulan 1=Jan ... 12=Des)_"
         )
+        mp = cfg["musim_panen"]["lokal"]
+        k1, k2, k3, k4 = st.columns(4)
+        pu_mulai = k1.number_input("Panen utama — mulai bulan", min_value=1, max_value=12, step=1, value=int(mp["panen_utama"]["mulai_bulan"]))
+        pu_selesai = k2.number_input("Panen utama — selesai bulan", min_value=1, max_value=12, step=1, value=int(mp["panen_utama"]["selesai_bulan"]))
+        ps_mulai = k3.number_input("Panen sela — mulai bulan", min_value=1, max_value=12, step=1, value=int(mp["panen_sela"]["mulai_bulan"]))
+        ps_selesai = k4.number_input("Panen sela — selesai bulan", min_value=1, max_value=12, step=1, value=int(mp["panen_sela"]["selesai_bulan"]))
+
+        st.divider()
         simpan = st.form_submit_button("💾 Simpan & tandai TERVALIDASI" if konfirmasi else "💾 Simpan sebagai draft")
 
         if simpan:
@@ -358,16 +561,8 @@ with tab_param:
             cfg["rendemen"]["susut_pengeringan_pct"] = susut_kering
             cfg["rendemen"]["susut_sortasi_pct"] = susut_sortasi
 
-            cfg["biaya_proses"]["fermentasi"] = biaya_fermentasi
-            cfg["biaya_proses"]["pengeringan"] = biaya_pengeringan
-            cfg["biaya_proses"]["tenaga_kerja"] = biaya_tenaga
-            cfg["biaya_proses"]["sortasi_packing"] = biaya_sortasi
-            cfg["biaya_proses"]["susut_bobot"] = biaya_susut
-
-            cfg["overhead"]["freight_ke_buyer"] = ovh_freight
-            cfg["overhead"]["penyimpanan_gudang"] = ovh_gudang
-            cfg["overhead"]["overhead_umum"] = ovh_umum
-            cfg["overhead"]["susut_penyimpanan_pct_per_bulan"] = ovh_susut_bln
+            cfg["overhead_cost"]["nilai_rp_kg"] = overhead_cost_input
+            cfg["other_cost"]["nilai_rp_kg"] = other_cost_input
 
             for t in cfg["titik_terima"]:
                 t["freight_tambahan_rp_kg"] = freight_titik[t["kode"]]
@@ -387,6 +582,11 @@ with tab_param:
             cfg["cost_of_carry"]["gudang_rp_per_kg_bulan"] = gudang_carry
             cfg["cost_of_carry"]["susut_pct_per_bulan"] = susut_carry
             cfg["cost_of_carry"]["risiko_turun_grade_pct_per_bulan"] = risiko_grade_carry
+
+            cfg["musim_panen"]["lokal"]["panen_utama"]["mulai_bulan"] = int(pu_mulai)
+            cfg["musim_panen"]["lokal"]["panen_utama"]["selesai_bulan"] = int(pu_selesai)
+            cfg["musim_panen"]["lokal"]["panen_sela"]["mulai_bulan"] = int(ps_mulai)
+            cfg["musim_panen"]["lokal"]["panen_sela"]["selesai_bulan"] = int(ps_selesai)
 
             if konfirmasi:
                 cfg["meta"]["status"] = "TERVALIDASI"

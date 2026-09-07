@@ -4,6 +4,18 @@ Implementasi kerja dari `CGG-Trading-Guard-Spesifikasi-Sistem.md`. Sistem
 penasihat (bukan prediktor, bukan auto-trader) untuk dua keputusan: harga
 beli maksimum ke petani, dan jual-vs-tahan untuk lot yang sudah dibeli.
 
+## Mengisi tujuh angka wajib (supaya berhenti jadi "BELUM DIVALIDASI")
+
+Tidak perlu edit `config/parameters.yaml` manual lagi — buka dashboard,
+tab **⚙️ Parameter (7 Angka)**, isi rendemen/Overhead Cost/Other Cost/premium/
+biaya modal dari data aktual CGG, centang kotak konfirmasi, dan simpan.
+Banner peringatan otomatis hilang begitu status berubah jadi `TERVALIDASI`.
+
+Di Streamlit Cloud, perubahan lewat tab ini **tidak permanen** (ephemeral
+storage — sama seperti database, lihat catatan di bawah). Setelah simpan,
+dashboard menampilkan YAML final untuk disalin balik ke `config/parameters.yaml`
+di repo GitHub Anda supaya perubahannya bertahan setelah reboot/redeploy.
+
 ## Menjalankan secara lokal
 
 ```bash
@@ -78,19 +90,49 @@ sebagai gantinya, atau buat `.streamlit/secrets.toml` (sudah di-`.gitignore`, ja
   dashboard dibuka**.
 - **Buy Guard & Sell Guard** — logika reverse-pricing dan cost-of-carry
   persis sesuai spesifikasi.
+- **Musim & Dampak Global** (dari catatan tim, 2026-09) — kalender panen
+  lokal (editable di tab Parameter) yang memberi catatan Dampak + Antisipasi
+  per fase panen, plus cuaca sabuk produsen Afrika Barat (Pantai Gading &
+  Ghana, via Open-Meteo, sama seperti cuaca lokal) sebagai konteks kenapa
+  index dunia bergerak. Keduanya kualitatif dulu (belum mengubah band angka
+  otomatis) — lihat `src/engine/musiman.py` untuk alasannya.
 - **Band skenario** (bagian 5.3) — jatuh ke lebar default eksplisit selama
   data historis harga belum cukup (>=30 titik), dengan flag terbuka di
   dashboard, bukan diam-diam memakai angka sembarangan.
+- **Grafik tren harga ICCO** (tab Data Pasar & Iklim) — rata-rata bulanan
+  resmi ICCO (icco.org/statistics) sejak Januari 2005, ~260 bulan, ditarik
+  via scraping dua-langkah (nonce halaman + AJAX tabel mereka — bukan API
+  resmi, lihat `src/ingest/price_historis.py`). Grafik Plotly interaktif
+  (zoom, range selector 1T/3T/5T/Semua) dengan **deteksi anomali** otomatis
+  (z-score volatilitas bulanan, ambang 2 std dev) — tiap anomali dapat
+  analisa singkat + rekomendasi yang mengarahkan balik ke Buy/Sell Guard
+  (bukan sinyal beli/jual baru yang berdiri sendiri).
 - **Dashboard Streamlit** — Buy Guard, Sell Guard, data pasar/iklim, form
-  input manual, dan pengiriman brief ke email (opsional, lihat di atas).
+  input manual, tab isi 7 parameter (lihat di atas), dan pengiriman brief
+  ke email (opsional, lihat di atas).
 - **Daily Brief** — teks tersusun sesuai format spesifikasi, disimpan ke
   `data/brief-YYYY-MM-DD.txt` (lokal) dan bisa dikirim ke email.
+- **Harga otomatis harian** — Yahoo Finance (`CC=F`, kontrak depan ICE Cocoa
+  New York) + kurs USD/IDR dari open.er-api.com, keduanya gratis tanpa API
+  key. Ambil sendiri setiap dashboard dibuka (auto-bootstrap) atau lewat
+  scheduler pagi/sore. **Ini proxy harian**, beda dari grafik tren bulanan
+  di atas yang sudah pakai angka resmi ICCO — tetap ada tombol override
+  manual di tab Input Manual kalau fetch gagal atau Anda punya angka yang
+  lebih dipercaya.
+
+⚠️ **Kerapuhan sumber data yang perlu diketahui:** feed harga harian
+(Yahoo Finance) dan grafik tren ICCO **bukan API resmi** — keduanya
+scraping/endpoint tidak resmi yang bisa berhenti berfungsi kalau
+providernya mengubah struktur halaman. Kalau itu terjadi, dashboard tidak
+crash (selalu fallback ke data tersimpan terakhir + input manual tetap
+tersedia), tapi datanya jadi tidak ter-update — cek `sumber`/tanggal yang
+ditampilkan di setiap kartu data untuk tahu seberapa segar angkanya.
 
 ## Yang BELUM dihubungkan (dan kenapa)
 
 | Bagian | Status | Alasan |
 |---|---|---|
-| Feed harga futures ICE otomatis | Stub (`AUTOMATED_FEED_ENABLED = False`) di `src/ingest/price.py` | Perlu provider berbayar + verifikasi lisensi redistribusi (lihat spesifikasi 3.1). Ini keputusan legal/komersial |
+| Index resmi ICCO harian (metodologi rata-rata 3 bulan London+NY) | Belum — harga harian masih proxy Yahoo Finance (kontrak depan NY tunggal). **Rata-rata bulanan resmi ICCO sudah jalan** (grafik tren, lihat di atas) | Data futures ICE mentah (untuk rekonstruksi index harian sesuai metodologi ICCO persis) ada di balik provider berbayar + lisensi redistribusi yang harus diverifikasi dulu (lihat spesifikasi 3.1). Tabel statistik bulanan ICCO sendiri ternyata gratis diakses publik, jadi itu yang dipakai untuk grafik tren |
 | Pengiriman WhatsApp otomatis | Belum ada | Butuh WhatsApp Business API + izin eksplisit pemilik akun. Email sudah tersedia sebagai alternatif (lihat di atas) |
 | Parameter biaya internal | Semua masih **placeholder 0** di `config/parameters.yaml` | Tujuh angka di spesifikasi bagian 11 belum dikonfirmasi pemilik data — output Buy/Sell Guard saat ini TIDAK BOLEH dipakai untuk keputusan nyata sampai ini diisi |
 | Scheduler otomatis 24/7 | Tidak jalan di Streamlit Cloud | Perlu proses latar belakang terpisah (VPS/laptop selalu nyala) — lihat bagian "Batasan penting" di atas |
@@ -108,6 +150,6 @@ Anda tidak menyeret folder `__pycache__` (biasanya muncul lagi setelah
 
 ## Langkah berikutnya (Fase 0 di roadmap spesifikasi)
 
-Isi tujuh angka di bagian 11 spesifikasi ke `config/parameters.yaml`,
-lalu jalankan ulang `python run_once.py` — seluruh mesin keputusan langsung
-memakai angka yang benar tanpa perlu ubah kode.
+Isi tujuh angka di bagian 11 spesifikasi lewat tab **⚙️ Parameter (7 Angka)**
+di dashboard (atau edit `config/parameters.yaml` manual kalau lebih suka) —
+seluruh mesin keputusan langsung memakai angka yang benar tanpa perlu ubah kode.

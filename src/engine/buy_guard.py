@@ -42,21 +42,16 @@ def hitung_harga_beli_maks(
     margin = harga_jual * margin_pct
 
     # 3. Seluruh biaya per kg kering
-    biaya_proses = sum(
-        v for k, v in cfg["biaya_proses"].items() if k != "catatan"
-    )
-    ovh = cfg["overhead"]
-    overhead = (
-        ovh["freight_ke_buyer"]
-        + ovh["penyimpanan_gudang"]
-        + ovh["overhead_umum"]
-    )
+    # Struktur: Harga Jual = Biaya Pokok Produksi (Raw Material, di-solve di
+    # langkah 4 di bawah) + Overhead Cost + Other Cost + Margin.
+    overhead_cost = cfg["overhead_cost"]["nilai_rp_kg"]
+    other_cost = cfg["other_cost"]["nilai_rp_kg"]
     titik = next(
         t for t in cfg["titik_terima"] if t["kode"] == kode_titik
     )
-    overhead += titik["freight_tambahan_rp_kg"]
+    other_cost += titik["freight_tambahan_rp_kg"]
 
-    total_biaya = margin + biaya_proses + overhead
+    total_biaya = margin + overhead_cost + other_cost
 
     # 4. Sisa yang boleh dibayarkan ke petani
     sisa_kering = harga_jual - total_biaya

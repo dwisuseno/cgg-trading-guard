@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS market_price (
   diambil_pada       TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS market_price_historis_bulanan (
+  periode         TEXT PRIMARY KEY,  -- 'YYYY-MM'
+  index_eur_ton   REAL,
+  index_usd_ton   REAL,
+  sumber          TEXT,
+  diambil_pada    TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS climate (
   periode      TEXT PRIMARY KEY,
   oni          REAL,
@@ -132,6 +140,22 @@ def price_history(conn, hari: int = 90):
         "ORDER BY tanggal DESC LIMIT ?",
         (hari,),
     ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def historis_bulanan(conn, tahun: int | None = None):
+    """Seri bulanan lengkap (atau N tahun terakhir), lama -> baru, untuk grafik tren."""
+    if tahun:
+        rows = conn.execute(
+            "SELECT * FROM market_price_historis_bulanan "
+            "WHERE periode >= date('now', ?) "
+            "ORDER BY periode ASC",
+            (f"-{tahun} years",),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM market_price_historis_bulanan ORDER BY periode ASC"
+        ).fetchall()
     return [dict(r) for r in rows]
 
 

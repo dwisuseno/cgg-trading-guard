@@ -1,8 +1,8 @@
 meta:
   versi: 0.1-DRAFT
-  status: BELUM DIVALIDASI
+  status: TERVALIDASI
   terakhir_diperbarui: '2026-09-07'
-  diperbarui_oleh: —
+  diperbarui_oleh: aji
 rendemen:
   basah_ke_kering:
     konservatif: 3.3
@@ -11,18 +11,14 @@ rendemen:
   susut_pengeringan_pct: 2.0
   susut_sortasi_pct: 3.0
   catatan: WAJIB diganti dengan rendemen tertimbang aktual per titik terima
-biaya_proses:
-  fermentasi: 0.0
-  pengeringan: 0.0
-  tenaga_kerja: 0.0
-  sortasi_packing: 0.0
-  susut_bobot: 0.0
-  catatan: Ambil dari data aktual, bukan estimasi
-overhead:
-  freight_ke_buyer: 0.0
-  penyimpanan_gudang: 0.0
-  overhead_umum: 0.0
-  susut_penyimpanan_pct_per_bulan: 0.5
+overhead_cost:
+  nilai_rp_kg: 0.0
+  catatan: Gabungan fermentasi + pengeringan + tenaga kerja + sortasi/packing + susut
+    bobot, per kg kering. Ambil dari data aktual, bukan estimasi.
+other_cost:
+  nilai_rp_kg: 0.0
+  catatan: 'Biaya lain per kg kering di luar overhead produksi: freight ke buyer,
+    penyimpanan gudang, alokasi biaya tetap/overhead umum.'
 margin_target:
   premium: 0.12
   medium: 0.1
@@ -56,8 +52,8 @@ grade:
     slaty_maks_pct: 100
 cost_of_carry:
   biaya_modal_tahunan_pct: 12.0
-  gudang_rp_per_kg_bulan: 0.0
-  susut_pct_per_bulan: 0.5
+  gudang_rp_per_kg_bulan: 20.0
+  susut_pct_per_bulan: 0.6
   risiko_turun_grade_pct_per_bulan: 1.0
 titik_terima:
 - kode: BRU-01
@@ -70,6 +66,30 @@ titik_terima:
   lat: -3.5
   lon: 120.0
   freight_tambahan_rp_kg: 0.0
+titik_pantau_global:
+- kode: CIV-01
+  nama: Pantai Gading (Cote d'Ivoire)
+  lat: 6.8
+  lon: -5.3
+  catatan: Produsen kakao terbesar dunia (~40% pasokan global)
+- kode: GHA-01
+  nama: Ghana
+  lat: 7.0
+  lon: -1.5
+  catatan: Produsen kakao terbesar kedua dunia
+musim_panen:
+  lokal:
+    panen_utama:
+      mulai_bulan: 9
+      selesai_bulan: 12
+    panen_sela:
+      mulai_bulan: 4
+      selesai_bulan: 6
+    catatan: Perkiraan awal -- ganti dengan kalender panen aktual per titik terima
+  catatan: Fase panen TIDAK mengubah rumus Buy/Sell Guard secara otomatis (belum ada
+    data historis untuk mengkalibrasinya, seperti ONI) -- baru muncul sebagai catatan
+    Dampak + Antisipasi di dashboard/brief. Tinjau ulang setelah beberapa musim data
+    terkumpul.
 band_skenario:
   confidence_z: 1.28
   jendela_volatilitas_hari: 90
@@ -84,8 +104,8 @@ band_skenario:
       pengali: 1.2
     netral:
       pengali: 1.0
-catatan_klarifikasi_harga: ''
+catatan_klarifikasi_harga: Rp73.000/kg kering — ini harga beli
 komposisi_penjualan_2025:
-  artisan: 0.0
-  pabrik_chocolate_maker: 0.0
-  trader_asalan: 0.0
+  artisan: 20.0
+  pabrik_chocolate_maker: 30.0
+  trader_asalan: 50.0

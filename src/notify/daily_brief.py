@@ -24,6 +24,8 @@ def susun_brief(
     posisi_stok: dict,    # {"total_kg": ..., "umur_rata_hari": ..., "sinyal": ...}
     alerts: list,
     nama_titik: dict,     # {"BRU-01": "Berau", "SUL-01": "Sulawesi"}
+    musim: dict | None = None,        # dari engine.musiman.fase_panen_lokal()
+    cuaca_global: dict | None = None, # {"CIV-01": {...}, "GHA-01": {...}}
 ) -> str:
     idx = harga.get("index_idr_per_kg")
     idx_txt = f"{idx:,.0f}".replace(",", ".") if idx else "—"
@@ -60,6 +62,29 @@ def susun_brief(
 
     alert_txt = "\n".join(f"• {a}" for a in alerts) if alerts else "• Tidak ada alert hari ini"
 
+    musim = musim or {}
+    baris_musim = ""
+    if musim:
+        baris_musim = (
+            f"\n📅 MUSIM ({musim.get('label', '—')})\n"
+            f"Dampak: {musim.get('dampak', '—')}\n"
+            f"Antisipasi: {musim.get('antisipasi', '—')}\n"
+        )
+
+    baris_global_txt = ""
+    if cuaca_global:
+        baris_global = []
+        for kode, c in cuaca_global.items():
+            c = c or {}
+            baris_global.append(
+                f"{kode:<7}: {c.get('hujan_14hari_mm', '—')}mm — risiko proses {c.get('risiko_proses', '—')}"
+            )
+        if baris_global:
+            baris_global_txt = (
+                "\n🌍 IKLIM SABUK PRODUSEN (Afrika Barat — sinyal index dunia)\n"
+                + chr(10).join(baris_global) + "\n"
+            )
+
     return f"""🌱 CGG TRADING GUARD — {_tgl_pendek(tanggal)}
 
 📊 PASAR
@@ -69,9 +94,9 @@ Kurs : Rp{kurs_txt}/USD
 🌊 IKLIM
 ONI {oni_txt} ({fase_txt})
 
-🌧️ CUACA 14 HARI
+🌧️ CUACA 14 HARI (lokal — risiko proses)
 {chr(10).join(baris_cuaca)}
-
+{baris_global_txt}{baris_musim}
 💰 HARGA BELI MAKS HARI INI — KONSERVATIF (Rp/kg)
         BASAH        KERING
 {chr(10).join(baris_harga)}

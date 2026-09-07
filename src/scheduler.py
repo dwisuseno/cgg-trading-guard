@@ -25,8 +25,8 @@ import yaml
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from . import db
-from .ingest import price, climate, weather
-from .engine import buy_guard, sell_guard, scenario
+from .ingest import price, climate, weather, price_historis
+from .engine import buy_guard, sell_guard, scenario, musiman
 from .notify import daily_brief
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -70,25 +70,60 @@ def ingest_harga():
         return hasil
 
 
-def ingest_cuaca():
-    cfg = load_config()
-    hasil = {}
+def ingest_historis_icco():
+    """
+    Tarik seluruh seri bulanan resmi ICCO (icco.org/statistics) dan simpan.
+    Aman dipanggil berkali-kali (upsert). Kalau ICCO mengubah halaman/plugin
+    mereka dan scraping ini gagal, dashboard tetap jalan dengan data yang
+    sudah tersimpan sebelumnya -- lihat price_historis.py.
+    """
+    baris = price_historis.ambil_historis_bulanan_icco()
     with db.get_connection() as conn:
-        for titik in cfg["titik_terima"]:
-            data = weather.ambil_cuaca(titik["lat"], titik["lon"])
-            row = {
-                "tanggal": date.today().isoformat(),
-                "kode_titik": titik["kode"],
-                "hujan_mm": data["hujan_hari_ini_mm"],
-                "hujan_14hari_mm": data["hujan_14hari_mm"],
-                "kelembapan_pct": data["kelembapan_pct"],
-                "radiasi_mj": data["radiasi_mj"],
-                "risiko_proses": data["risiko_proses"],
-            }
-            db.upsert(conn, "weather", row)
-            hasil[titik["kode"]] = data
-            log.info("Cuaca %s: hujan 14hr %.1fmm, risiko %s", titik["nama"], data["hujan_14hari_mm"], data["risiko_proses"])
+        for b in baris:
+            db.upsert(conn, "market_price_historis_bulanan", {
+                "periode": b["periode"],
+                "index_eur_ton": b["index_eur_ton"],
+                "index_usd_ton": b["index_usd_ton"],
+                "sumber": "ICCO resmi (icco.org/statistics)",
+                "diambil_pada": datetime.now().isoformat(timespec="seconds"),
+            })
+    log.info("Historis ICCO tersimpan: %d bulan (%s .. %s)", len(baris), baris[0]["periode"] if baris else "-", baris[-1]["periode"] if baris else "-")
+    return baris
+
+
+def _ingest_cuaca_untuk(conn, titik_list):
+    hasil = {}
+    for titik in titik_list:
+        data = weather.ambil_cuaca(titik["lat"], titik["lon"])
+        row = {
+            "tanggal": date.today().isoformat(),
+            "kode_titik": titik["kode"],
+            "hujan_mm": data["hujan_hari_ini_mm"],
+            "hujan_14hari_mm": data["hujan_14hari_mm"],
+            "kelembapan_pct": data["kelembapan_pct"],
+            "radiasi_mj": data["radiasi_mj"],
+            "risiko_proses": data["risiko_proses"],
+        }
+        db.upsert(conn, "weather", row)
+        hasil[titik["kode"]] = data
+        log.info("Cuaca %s: hujan 14hr %.1fmm, risiko %s", titik["nama"], data["hujan_14hari_mm"], data["risiko_proses"])
     return hasil
+
+
+def ingest_cuaca():
+    """Cuaca LOKAL (titik_terima) -- soal risiko proses (pengeringan/fermentasi)."""
+    cfg = load_config()
+    with db.get_connection() as conn:
+        return _ingest_cuaca_untuk(conn, cfg["titik_terima"])
+
+
+def ingest_cuaca_global():
+    """Cuaca sabuk produsen GLOBAL (titik_pantau_global, mis. Pantai Gading/Ghana)
+    -- soal sinyal pasokan yang mendahului pergerakan index dunia, bukan risiko
+    proses CGG sendiri. Lihat catatan tim 2026-09 ("kondisi iklim Utara")."""
+    cfg = load_config()
+    with db.get_connection() as conn:
+        return _ingest_cuaca_untuk(conn, cfg.get("titik_pantau_global", []))
 
 
 def ingest_oni():
@@ -191,6 +226,11 @@ def kirim_daily_brief():
         harga = db.latest_market_price(conn) or {}
         clim = db.latest_climate(conn) or {}
         cuaca = {t["kode"]: db.latest_weather(conn, t["kode"]) or {} for t in cfg["titik_terima"]}
+        cuaca_global = {
+            t["kode"]: db.latest_weather(conn, t["kode"]) or {}
+            for t in cfg.get("titik_pantau_global", [])
+        }
+        musim = musiman.fase_panen_lokal(cfg, tanggal)
         rows = db.buy_guard_today(conn, tanggal.isoformat())
         lots = db.open_lots(conn)
         posisi = {
@@ -207,6 +247,7 @@ def kirim_daily_brief():
         teks = daily_brief.susun_brief(
             tanggal=tanggal, harga=harga, climate=clim, cuaca=cuaca,
             buy_guard_rows=rows, posisi_stok=posisi, alerts=alerts, nama_titik=nama_titik,
+            musim=musim, cuaca_global=cuaca_global,
         )
         print(teks)
         out_path = db.BASE_DIR / "data" / f"brief-{tanggal.isoformat()}.txt"
@@ -234,6 +275,7 @@ def pagi():
     """Sebelum crew turun ke lapangan."""
     ingest_harga()
     ingest_cuaca()
+    ingest_cuaca_global()
     hitung_buy_guard()
     kirim_daily_brief()
 
