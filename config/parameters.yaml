@@ -1,0 +1,96 @@
+# config/parameters.yaml
+# SEMUA ANGKA DI BAWAH INI ADALAH PLACEHOLDER
+# WAJIB diganti dengan data aktual sebelum sistem dipakai untuk keputusan nyata
+
+meta:
+  versi: "0.1-DRAFT"
+  status: "BELUM DIVALIDASI"
+  terakhir_diperbarui: "2026-09-07"
+  diperbarui_oleh: "—"
+
+# ── RENDEMEN ──────────────────────────────────────────────
+# Parameter paling sensitif di seluruh sistem.
+# Pergeseran 0,1 poin ≈ Rp2.200/kg pada harga basah Rp22.000.
+rendemen:
+  basah_ke_kering:
+    konservatif: 3.30   # butuh lebih banyak basah per kg kering = HPP lebih tinggi
+    basis:       3.10
+    optimis:     3.00
+  susut_pengeringan_pct: 2.0
+  susut_sortasi_pct:     3.0
+  catatan: "WAJIB diganti dengan rendemen tertimbang aktual per titik terima"
+
+# ── BIAYA PROSES (Rp per kg KERING) ───────────────────────
+biaya_proses:
+  fermentasi:      0
+  pengeringan:     0
+  tenaga_kerja:    0
+  sortasi_packing: 0
+  susut_bobot:     0
+  catatan: "Ambil dari data aktual, bukan estimasi"
+
+# ── OVERHEAD (Rp per kg kering) ───────────────────────────
+overhead:
+  freight_ke_buyer:     0
+  penyimpanan_gudang:   0
+  overhead_umum:        0   # alokasi biaya tetap ÷ volume
+  susut_penyimpanan_pct_per_bulan: 0.5
+
+# ── MARGIN TARGET (% dari harga jual) ─────────────────────
+# Naikkan saat ketidakpastian tinggi (El Niño kuat, band lebar)
+margin_target:
+  premium: 0.12
+  medium:  0.10
+  low:     0.08
+  penalti_ketidakpastian_tinggi: 0.03   # tambahan saat |ONI| >= 1.0
+
+# ── SPREAD HARGA JUAL PER SEGMEN ──────────────────────────
+# Premium terhadap harga index. WAJIB diverifikasi dari kontrak aktual.
+segmen_jual:
+  artisan:
+    premium_thd_index: 0.10
+    syarat: "Fermentasi terdokumentasi, bean count 80-90, KA <=7.5%"
+  pabrik_chocolate_maker:
+    premium_thd_index: 0.03
+    syarat: "Bean count 90-110, KA <=7.5%"
+  trader_asalan:
+    premium_thd_index: 0.00
+    syarat: "Tanpa syarat mutu khusus"
+
+# ── SPESIFIKASI GRADE ─────────────────────────────────────
+grade:
+  premium: { bean_count_min: 80, bean_count_max: 90,  ka_maks: 7.5, slaty_maks_pct: 3 }
+  medium:  { bean_count_min: 90, bean_count_max: 110, ka_maks: 7.5, slaty_maks_pct: 10 }
+  low:     { bean_count_min: 110, bean_count_max: 999, ka_maks: 8.0, slaty_maks_pct: 100 }
+
+# ── COST OF CARRY (untuk Sell Guard) ──────────────────────
+cost_of_carry:
+  biaya_modal_tahunan_pct: 12.0
+  gudang_rp_per_kg_bulan:  0
+  susut_pct_per_bulan:     0.5
+  risiko_turun_grade_pct_per_bulan: 1.0
+
+# ── TITIK TERIMA ──────────────────────────────────────────
+# Berau dan Sulawesi punya struktur biaya berbeda. Jangan disamakan.
+titik_terima:
+  - kode: BRU-01
+    nama: "Berau"
+    lat: -2.0
+    lon: 117.4
+    freight_tambahan_rp_kg: 0
+  - kode: SUL-01
+    nama: "Sulawesi"
+    lat: -3.5
+    lon: 120.0
+    freight_tambahan_rp_kg: 0
+
+# ── PEMBENTUKAN BAND SKENARIO (lihat spesifikasi 5.3) ─────
+band_skenario:
+  confidence_z: 1.28          # ~80% confidence
+  jendela_volatilitas_hari: 90
+  minimum_titik_data: 30      # di bawah ini, band jatuh ke default_lebar_pct
+  default_lebar_pct: 0.12     # dipakai saat data historis belum cukup (baru mulai)
+  pengali_regime:
+    oni_tinggi: { ambang_abs_oni: 1.0, pengali: 1.5 }
+    oni_sedang: { ambang_abs_oni: 0.5, pengali: 1.2 }
+    netral:     { pengali: 1.0 }
