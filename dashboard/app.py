@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src import db, scheduler
-from src.ingest import price
+from src.ingest import price, supply_demand
 from src.notify import email_sender
 from src.engine import musiman, anomali, korelasi
 
@@ -135,7 +135,10 @@ if not st.session_state.get("bootstrapped_today") == date.today().isoformat():
 # reset ke awal tiap ada interaksi lain di halaman (mis. klik tombol) --
 # st.tabs() murni tampilan, tidak menyimpan state; ini penting untuk demo
 # live supaya presenter tidak "terlempar" balik ke tab pertama tanpa sengaja.
-NAV_OPTIONS = ["💰 Buy Guard", "📊 Data Pasar & Iklim", "📦 Sell Guard", "⚙️ Parameter (7 Angka)", "✍️ Input Manual"]
+# Urutan sengaja menaruh dua fitur inti (Buy Guard, Sell Guard) dan Jurnal
+# Keputusan di depan -- itu yang jadi fokus cerita produk. Data Pasar/Iklim,
+# Parameter, dan Input Manual tetap ada tapi sebagai pendukung, bukan headline.
+NAV_OPTIONS = ["💰 Buy Guard", "📦 Sell Guard", "📖 Jurnal Keputusan", "📊 Data Pasar & Iklim", "⚙️ Parameter (7 Angka)", "✍️ Input Manual"]
 
 nav_col, refresh_col = st.columns([5, 1.7])
 with nav_col:
@@ -227,6 +230,58 @@ if nav == "💰 Buy Guard":
                 st.markdown("**Kering (Rp/kg)**")
                 st.dataframe(kering[cols].style.format("{:,.0f}"), width="stretch")
         st.caption("⚠️ Pegang kolom **konservatif** di lapangan. Tawaran di atas **basis** wajib persetujuan koordinator + alasan tertulis.")
+
+        st.divider()
+        st.markdown("**✍️ Catat transaksi beli hari ini**")
+        st.caption(
+            "Setiap transaksi dicatat terhadap batas sistem saat itu (P4: override diizinkan & "
+            "dicatat, bukan diblokir) — ini yang mengisi tab 📖 Jurnal Keputusan."
+        )
+        opsi_lot = [
+            (f"{r['kode_titik']} · {r['grade']} · konservatif = Rp{r['harga_maks_basah']:,.0f}".replace(",", "."), r)
+            for r in rows_today if r["skenario"] == "konservatif"
+        ]
+        with st.form("form_transaksi_beli"):
+            pilihan = st.selectbox("Titik & grade acuan", options=[o[0] for o in opsi_lot]) if opsi_lot else None
+            tc1, tc2, tc3 = st.columns(3)
+            lot_id_beli = tc1.text_input("Lot ID", placeholder="mis. BRU-2026-015")
+            berat_beli = tc2.number_input("Berat (kg, basah)", min_value=0.0, step=10.0)
+            harga_aktual = tc3.number_input("Harga aktual dibayar (Rp/kg)", min_value=0.0, step=100.0)
+            id_petani = st.text_input("Nama/ID petani (opsional)")
+            alasan = st.text_area("Alasan (wajib kalau harga di atas basis)", placeholder="mis. Volume besar, kualitas premium terverifikasi...")
+            simpan_transaksi = st.form_submit_button("💾 Simpan transaksi")
+            if simpan_transaksi and lot_id_beli and pilihan:
+                acuan = next(r for label, r in opsi_lot if label == pilihan)
+                harga_sistem = acuan["harga_maks_basah"]
+                deviasi = harga_aktual - harga_sistem
+                with db.get_connection() as conn:
+                    db.upsert(conn, "transaksi_beli", {
+                        "lot_id": lot_id_beli,
+                        "tanggal": date.today().isoformat(),
+                        "kode_titik": acuan["kode_titik"],
+                        "id_petani": id_petani or None,
+                        "bentuk": "basah",
+                        "grade_intake": acuan["grade"],
+                        "berat_kg": berat_beli,
+                        "harga_aktual_rp_kg": harga_aktual,
+                        "harga_maks_sistem": harga_sistem,
+                        "deviasi_rp_kg": deviasi,
+                        "alasan_override": alasan or None,
+                        "dicatat_oleh": None,
+                    })
+                    db.upsert(conn, "lot_realisasi", {
+                        "lot_id": lot_id_beli, "berat_masuk_kg": berat_beli, "berat_kering_kg": None,
+                        "rendemen_aktual": None, "rendemen_diasumsikan": cfg["rendemen"]["basah_ke_kering"]["basis"],
+                        "metode_fermentasi": None, "durasi_fermentasi_jam": None, "bean_count": None,
+                        "ka_pct": None, "slaty_pct": None, "grade_akhir": acuan["grade"],
+                        "hpp_aktual_rp_kg": harga_aktual, "tanggal_jual": None, "segmen_pembeli": None,
+                        "harga_jual_rp_kg": None, "margin_realisasi_rp_kg": None, "umur_stok_hari": 0,
+                    })
+                if deviasi > 0 and not alasan:
+                    st.warning(f"Tersimpan, tapi harga Rp{deviasi:,.0f}/kg di atas batas sistem TANPA alasan — lengkapi di Jurnal Keputusan.".replace(",", "."))
+                else:
+                    st.success(f"Transaksi {lot_id_beli} tersimpan. Deviasi: Rp{deviasi:+,.0f}/kg.".replace(",", "."))
+                st.rerun()
     else:
         st.caption("Belum ada hasil Buy Guard untuk hari ini.")
 
@@ -252,8 +307,100 @@ if nav == "📦 Sell Guard":
                 c3.metric("Band 3 bulan", f"{r['band']['band_bawah']:,.0f} – {r['band']['band_atas']:,.0f}".replace(",", "."))
                 if not r["band"]["data_cukup"]:
                     st.caption(f"ℹ️ {r['band']['catatan']}")
+
+                with st.expander(f"✅ Tandai Lot {r['lot_id']} terjual (tutup posisi)"):
+                    with st.form(f"form_tutup_{r['lot_id']}"):
+                        fc1, fc2 = st.columns(2)
+                        harga_jual_final = fc1.number_input("Harga jual aktual (Rp/kg)", min_value=0.0, step=100.0, key=f"hj_{r['lot_id']}")
+                        segmen_final = fc2.selectbox("Segmen pembeli", ["artisan", "pabrik_chocolate_maker", "trader_asalan"], key=f"seg_{r['lot_id']}")
+                        tutup = st.form_submit_button("Simpan & tutup lot")
+                        if tutup:
+                            lot_data = next(l for l in lots if l["lot_id"] == r["lot_id"])
+                            margin = harga_jual_final - (lot_data.get("hpp_aktual_rp_kg") or 0)
+                            with db.get_connection() as conn:
+                                db.upsert(conn, "lot_realisasi", {
+                                    **{k: v for k, v in lot_data.items() if k != "lot_id"},
+                                    "lot_id": r["lot_id"],
+                                    "tanggal_jual": date.today().isoformat(),
+                                    "segmen_pembeli": segmen_final,
+                                    "harga_jual_rp_kg": harga_jual_final,
+                                    "margin_realisasi_rp_kg": margin,
+                                })
+                            st.success(f"Lot {r['lot_id']} ditutup. Margin realisasi: Rp{margin:+,.0f}/kg (sinyal saat itu: {r['sinyal']}).".replace(",", "."))
+                            st.rerun()
     else:
         st.caption("Tekan tombol di atas untuk menghitung sinyal jual/tahan lot terbuka.")
+
+# ---------------- TAB: Jurnal Keputusan ----------------
+if nav == "📖 Jurnal Keputusan":
+    st.subheader("📖 Jurnal Keputusan")
+    st.caption(
+        "Riwayat keputusan beli (vs batas sistem) dan hasil jual (vs sinyal Sell Guard) — "
+        "acuan historis tim, bukan sinyal baru. Setiap baris berasal dari transaksi nyata yang dicatat di tab Buy Guard / Sell Guard."
+    )
+
+    with db.get_connection() as conn:
+        semua_beli = db.semua_transaksi_beli(conn)
+        semua_jual = db.lot_terjual(conn)
+
+    if not semua_beli and not semua_jual:
+        st.info(
+            "Belum ada transaksi tercatat. Catat pembelian di tab **💰 Buy Guard** "
+            "(formulir di bawah rekomendasi harga) atau tutup lot di tab **📦 Sell Guard**."
+        )
+    else:
+        total_beli = len(semua_beli)
+        sesuai_batas = sum(1 for t in semua_beli if (t["deviasi_rp_kg"] or 0) <= 0)
+        rata_deviasi = (
+            sum(t["deviasi_rp_kg"] or 0 for t in semua_beli) / total_beli if total_beli else 0
+        )
+        total_jual = len(semua_jual)
+        total_margin = sum(l["margin_realisasi_rp_kg"] or 0 for l in semua_jual)
+        rata_umur = (
+            sum(l["umur_stok_hari"] or 0 for l in semua_jual) / total_jual if total_jual else 0
+        )
+
+        st.markdown("**Scorecard**")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Keputusan beli tercatat", total_beli)
+        s2.metric(
+            "Sesuai/di bawah batas sistem",
+            f"{sesuai_batas}/{total_beli}" if total_beli else "–",
+        )
+        s3.metric("Rata-rata deviasi beli", f"Rp{rata_deviasi:+,.0f}/kg".replace(",", "."))
+        s4.metric("Total margin realisasi", f"Rp{total_margin:+,.0f}/kg".replace(",", "."))
+        if total_jual:
+            st.caption(f"Lot terjual: {total_jual} · rata-rata umur simpan: {rata_umur:.0f} hari")
+
+        st.divider()
+        st.markdown("**Linimasa**")
+
+        peristiwa = []
+        for t in semua_beli:
+            peristiwa.append({
+                "tanggal": t["tanggal"], "jenis": "BELI",
+                "lot_id": t["lot_id"],
+                "ringkasan": f"{t['kode_titik']} · {t['grade_intake']} · dibayar Rp{t['harga_aktual_rp_kg']:,.0f}/kg (batas sistem Rp{t['harga_maks_sistem']:,.0f}/kg)".replace(",", "."),
+                "deviasi": t["deviasi_rp_kg"], "alasan": t["alasan_override"],
+            })
+        for l in semua_jual:
+            peristiwa.append({
+                "tanggal": l["tanggal_jual"], "jenis": "JUAL",
+                "lot_id": l["lot_id"],
+                "ringkasan": f"terjual ke {l['segmen_pembeli'] or '–'} @ Rp{(l['harga_jual_rp_kg'] or 0):,.0f}/kg".replace(",", "."),
+                "deviasi": l["margin_realisasi_rp_kg"], "alasan": None,
+            })
+        peristiwa.sort(key=lambda p: p["tanggal"] or "", reverse=True)
+
+        for p in peristiwa:
+            ikon = "🛒" if p["jenis"] == "BELI" else "📤"
+            with st.container(border=True):
+                c1, c2 = st.columns([4, 1])
+                c1.markdown(f"{ikon} **{p['tanggal']}** — Lot `{p['lot_id']}` · {p['ringkasan']}")
+                label_angka = "Deviasi" if p["jenis"] == "BELI" else "Margin"
+                c2.metric(label_angka, f"Rp{(p['deviasi'] or 0):+,.0f}".replace(",", "."))
+                if p["jenis"] == "BELI" and (p["deviasi"] or 0) > 0:
+                    st.caption(f"Alasan: {p['alasan']}" if p["alasan"] else "⚠️ Di atas batas sistem, alasan belum diisi.")
 
 # ---------------- TAB: Data Pasar & Iklim ----------------
 if nav == "📊 Data Pasar & Iklim":
@@ -435,6 +582,113 @@ if nav == "📊 Data Pasar & Iklim":
                 st.caption(f"...dan {len(anomali_list) - 8} anomali lain (tampil 8 terbaru).")
         else:
             st.caption("Tidak ada anomali >2 standar deviasi pada data yang tersimpan.")
+
+    st.divider()
+    st.subheader("🌍 Keseimbangan Supply & Demand Global (ICCO Quarterly Bulletin)")
+    st.caption(
+        "Cocoa Production, Grindings, Stocks, dan Supply & Demand Balance dari siaran pers "
+        "\"Quarterly Bulletin of Cocoa Statistics\" ICCO — rilis 4x/tahun (Feb, Mei, Agu, Nov). "
+        "⚠️ Sejak 2025 bulletin LENGKAP (Excel/PDF) sudah berbayar — ini cuma ringkasan dari "
+        "siaran pers gratis, redaksinya berubah tiap rilis sehingga bisa gagal di-parse. Selalu "
+        "periksa/koreksi sebelum simpan (bukan auto-save)."
+    )
+    with db.get_connection() as conn:
+        semua_sd = db.semua_supply_demand(conn)
+    terbaru_sd = semua_sd[-1] if semua_sd else None
+
+    sd1, sd2 = st.columns([1, 1.4])
+    with sd1:
+        if st.button("🔍 Coba ambil dari siaran pers ICCO terbaru", key="ambil_sd"):
+            with st.spinner("Mengambil & mem-parsing siaran pers terbaru..."):
+                try:
+                    st.session_state["sd_prefill"] = supply_demand.ambil_ringkasan_bulletin_terbaru()
+                    st.success("Berhasil mengambil sebagian/seluruh angka — periksa di form di bawah sebelum simpan.")
+                except Exception as e:
+                    st.warning(f"Gagal mengambil otomatis: {e}. Isi manual di bawah.")
+    with sd2:
+        if terbaru_sd:
+            st.caption(
+                f"Data tersimpan terbaru: **{terbaru_sd['periode']}** (musim {terbaru_sd.get('musim_panen') or '—'}) · "
+                f"sumber: {terbaru_sd.get('sumber') or '—'}"
+            )
+        else:
+            st.caption("Belum ada data tersimpan — ambil otomatis atau isi manual di bawah.")
+
+    prefill = st.session_state.get("sd_prefill", {})
+    with st.form("form_supply_demand"):
+        fp1, fp2 = st.columns(2)
+        periode_sd = fp1.text_input("Periode rilis (YYYY-MM)", value=prefill.get("periode") or "")
+        musim_sd = fp2.text_input("Musim panen (cocoa year, mis. 2024/25)", value=prefill.get("musim_panen") or "")
+        fp3, fp4 = st.columns(2)
+        produksi_sd = fp3.number_input("Produksi (ribu ton)", value=float(prefill.get("produksi_ribu_ton") or 0.0), step=10.0)
+        grindings_sd = fp4.number_input("Grindings (ribu ton)", value=float(prefill.get("grindings_ribu_ton") or 0.0), step=10.0)
+        fp5, fp6 = st.columns(2)
+        stok_sd = fp5.number_input("Stok akhir musim (ribu ton)", value=float(prefill.get("stok_ribu_ton") or 0.0), step=10.0)
+        surplus_sd = fp6.number_input("Surplus (+) / Defisit (-) (ribu ton)", value=float(prefill.get("surplus_defisit_ribu_ton") or 0.0), step=5.0)
+        rasio_sd = st.number_input("Rasio Stok/Grindings (%)", value=float(prefill.get("rasio_stok_grindings_pct") or 0.0), step=0.5)
+        simpan_sd = st.form_submit_button("💾 Simpan data supply & demand")
+        if simpan_sd and periode_sd:
+            with db.get_connection() as conn:
+                db.upsert(conn, "supply_demand_kuartalan", {
+                    "periode": periode_sd,
+                    "musim_panen": musim_sd or None,
+                    "produksi_ribu_ton": produksi_sd or None,
+                    "produksi_pct_yoy": prefill.get("produksi_pct_yoy"),
+                    "grindings_ribu_ton": grindings_sd or None,
+                    "grindings_pct_yoy": prefill.get("grindings_pct_yoy"),
+                    "stok_ribu_ton": stok_sd or None,
+                    "surplus_defisit_ribu_ton": surplus_sd,
+                    "rasio_stok_grindings_pct": rasio_sd or None,
+                    "sumber": "ICCO Quarterly Bulletin (siaran pers)",
+                    "url_sumber": prefill.get("url_sumber"),
+                })
+            st.session_state.pop("sd_prefill", None)
+            st.success(f"Data supply & demand periode {periode_sd} tersimpan.")
+            st.rerun()
+
+    if terbaru_sd:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Produksi", f"{terbaru_sd.get('produksi_ribu_ton') or 0:,.0f} ribu ton".replace(",", "."),
+                   f"{terbaru_sd.get('produksi_pct_yoy'):+.1f}% YoY" if terbaru_sd.get("produksi_pct_yoy") is not None else None)
+        m2.metric("Grindings", f"{terbaru_sd.get('grindings_ribu_ton') or 0:,.0f} ribu ton".replace(",", "."),
+                   f"{terbaru_sd.get('grindings_pct_yoy'):+.1f}% YoY" if terbaru_sd.get("grindings_pct_yoy") is not None else None)
+        m3.metric("Stok akhir musim", f"{terbaru_sd.get('stok_ribu_ton') or 0:,.0f} ribu ton".replace(",", "."))
+        surplus_val = terbaru_sd.get("surplus_defisit_ribu_ton")
+        m4.metric(
+            "Surplus/Defisit",
+            f"{surplus_val:+,.0f} ribu ton".replace(",", ".") if surplus_val is not None else "—",
+        )
+        if surplus_val is not None:
+            if surplus_val > 0:
+                st.info(
+                    f"📗 **Pasar dunia surplus ~{surplus_val:,.0f} ribu ton** (musim {terbaru_sd.get('musim_panen') or '—'}) — "
+                    "pasokan lebih longgar dari kebutuhan olah global, tekanan harga cenderung melunak. "
+                    "Konteks ini mendukung sikap tawar lebih disiplin di **Buy Guard** (pegang skenario konservatif)."
+                    .replace(",", ".")
+                )
+            elif surplus_val < 0:
+                st.warning(
+                    f"📕 **Pasar dunia defisit ~{abs(surplus_val):,.0f} ribu ton** (musim {terbaru_sd.get('musim_panen') or '—'}) — "
+                    "pasokan lebih ketat dari kebutuhan olah global, tekanan harga cenderung menguat. "
+                    "Konteks ini jadi pertimbangan tambahan buat **Sell Guard** untuk lebih berhati-hati melepas stok terlalu cepat."
+                    .replace(",", ".")
+                )
+        if len(semua_sd) >= 2:
+            df_sd = pd.DataFrame(semua_sd)
+            df_sd["tanggal"] = pd.to_datetime(df_sd["periode"], format="%Y-%m")
+            fig_sd = go.Figure()
+            fig_sd.add_trace(go.Bar(x=df_sd["tanggal"], y=df_sd["surplus_defisit_ribu_ton"], name="Surplus(+)/Defisit(-)", marker_color="#5FA331"))
+            fig_sd.add_trace(go.Scatter(x=df_sd["tanggal"], y=df_sd["stok_ribu_ton"], name="Stok akhir musim", mode="lines+markers", line=dict(color="#4FC3E8"), yaxis="y2"))
+            fig_sd.update_layout(
+                height=320, margin=dict(l=10, r=10, t=30, b=10), template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                yaxis=dict(title="Surplus/Defisit (ribu ton)", gridcolor="rgba(255,255,255,0.08)"),
+                yaxis2=dict(title="Stok (ribu ton)", overlaying="y", side="right", gridcolor="rgba(0,0,0,0)"),
+            )
+            st.plotly_chart(fig_sd, width="stretch")
+    else:
+        st.caption("Belum ada data supply & demand tersimpan.")
 
     st.divider()
     c1, c2 = st.columns(2)

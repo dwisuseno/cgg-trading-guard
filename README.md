@@ -117,9 +117,20 @@ sebagai gantinya, atau buat `.streamlit/secrets.toml` (sudah di-`.gitignore`, ja
   Pearson, 0-6 bulan) — teknik standar riset dampak iklim-komoditas, lihat
   `src/engine/korelasi.py` — hasilnya kuantitatif dan jujur (korelasi
   lemah-sedang), dipakai sebagai konteks bukan sinyal prediksi.
-- **Dashboard Streamlit** — Buy Guard, Sell Guard, data pasar/iklim, form
-  input manual, tab isi 7 parameter (lihat di atas), dan pengiriman brief
-  ke email (opsional, lihat di atas).
+- **Dashboard Streamlit** — Buy Guard, Sell Guard, Jurnal Keputusan, data
+  pasar/iklim, form input manual, tab isi 7 parameter (lihat di atas), dan
+  pengiriman brief ke email (opsional, lihat di atas).
+- **Pencatatan transaksi beli & jual + Jurnal Keputusan** — tab **💰 Buy
+  Guard** punya formulir "Catat transaksi beli hari ini": setiap pembelian
+  dicatat terhadap batas harga sistem saat itu (tabel `transaksi_beli`),
+  deviasi dihitung otomatis, dan alasan wajib diisi kalau harga di atas
+  basis (P4 — override diizinkan & dicatat, bukan diblokir). Tab **📦 Sell
+  Guard** punya aksi "Tandai lot terjual" per kartu lot untuk menutup posisi
+  (mengisi `harga_jual_rp_kg`, `segmen_pembeli`, `margin_realisasi_rp_kg` di
+  `lot_realisasi`). Tab **📖 Jurnal Keputusan** menggabungkan keduanya jadi
+  satu scorecard (jumlah keputusan beli, rata-rata deviasi, total margin
+  realisasi) plus linimasa kronologis — inilah yang menjadikan Sell Guard
+  "acuan historis tim", bukan cuma kalkulator sekali pakai.
 - **Daily Brief** — teks tersusun sesuai format spesifikasi, disimpan ke
   `data/brief-YYYY-MM-DD.txt` (lokal) dan bisa dikirim ke email.
 - **Harga otomatis harian** — Yahoo Finance (`CC=F`, kontrak depan ICE Cocoa
@@ -129,6 +140,21 @@ sebagai gantinya, atau buat `.streamlit/secrets.toml` (sudah di-`.gitignore`, ja
   di atas yang sudah pakai angka resmi ICCO — tetap ada tombol override
   manual di tab Input Manual kalau fetch gagal atau Anda punya angka yang
   lebih dipercaya.
+
+- **Keseimbangan Supply & Demand Global** (tab Data Pasar & Iklim) — Cocoa
+  Production, Grindings, Stocks, dan Supply & Demand Balance dari siaran pers
+  "Quarterly Bulletin of Cocoa Statistics" ICCO (rilis 4x/tahun: Feb, Mei,
+  Agu, Nov). Tombol **"Coba ambil dari siaran pers ICCO terbaru"** mem-parsing
+  siaran pers gratis terbaru (best-effort, lihat `src/ingest/supply_demand.py`)
+  dan mengisi form — **tidak pernah auto-save**, harus dikonfirmasi/dikoreksi
+  manual dulu sebelum disimpan, karena redaksi siaran pers ICCO berubah-ubah
+  tiap rilis (diuji: rilis Agustus 2026 berhasil penuh, Mei 2026 sebagian,
+  Februari 2026 gagal total — parsing prosa memang jauh lebih rapuh
+  dibanding tabel statistik resmi yang dipakai untuk tren harga bulanan).
+  Hasilnya ditampilkan sebagai scorecard + grafik tren, dengan catatan
+  interpretasi yang menghubungkan surplus/defisit ke sikap tawar di Buy
+  Guard / Sell Guard — **konteks tambahan, bukan sinyal beli/jual baru**
+  (P2/P3, sama seperti overlay ICCO/ONI/curah hujan).
 
 ⚠️ **Kerapuhan sumber data yang perlu diketahui:** feed harga harian
 (Yahoo Finance) dan grafik tren ICCO **bukan API resmi** — keduanya

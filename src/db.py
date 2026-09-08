@@ -92,6 +92,21 @@ CREATE TABLE IF NOT EXISTS transaksi_beli (
   dicatat_oleh       TEXT
 );
 
+CREATE TABLE IF NOT EXISTS supply_demand_kuartalan (
+  periode                   TEXT PRIMARY KEY,  -- 'YYYY-MM' bulan rilis bulletin (Feb/Mei/Agu/Nov)
+  musim_panen               TEXT,              -- cocoa year data mengacu, mis. '2024/25'
+  produksi_ribu_ton         REAL,
+  produksi_pct_yoy          REAL,
+  grindings_ribu_ton        REAL,
+  grindings_pct_yoy         REAL,
+  stok_ribu_ton             REAL,
+  surplus_defisit_ribu_ton  REAL,  -- positif = surplus, negatif = defisit
+  rasio_stok_grindings_pct  REAL,
+  sumber                    TEXT,
+  url_sumber                TEXT,
+  diambil_pada              TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS lot_realisasi (
   lot_id                TEXT PRIMARY KEY,
   berat_masuk_kg        REAL,
@@ -220,3 +235,32 @@ def open_lots(conn):
         "SELECT * FROM lot_realisasi WHERE tanggal_jual IS NULL"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def lot_terjual(conn):
+    """Lot yang sudah ditutup (ada tanggal_jual) -- untuk Jurnal Keputusan."""
+    rows = conn.execute(
+        "SELECT * FROM lot_realisasi WHERE tanggal_jual IS NOT NULL ORDER BY tanggal_jual DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def semua_transaksi_beli(conn):
+    rows = conn.execute(
+        "SELECT * FROM transaksi_beli ORDER BY tanggal DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def semua_supply_demand(conn):
+    rows = conn.execute(
+        "SELECT * FROM supply_demand_kuartalan ORDER BY periode ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def latest_supply_demand(conn):
+    row = conn.execute(
+        "SELECT * FROM supply_demand_kuartalan ORDER BY periode DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
